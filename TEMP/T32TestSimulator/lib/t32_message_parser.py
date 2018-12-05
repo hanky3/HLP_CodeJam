@@ -42,7 +42,7 @@ class T32DataEncoder:
         return enc_val
 
     @staticmethod
-    def enc_float(float_val, size=4, endian='big', to_bytestr='true'):
+    def enc_float(float_val, size=4, endian='big', to_bytestr=True):
         formatters = {4: 'f', 8: 'd'}
         if size not in formatters:
             raise T32DataPacketError('[Encode Error][enc_float]Invalid Size : %d' % size)
@@ -56,7 +56,7 @@ class T32DataEncoder:
         return enc_val
 
     @staticmethod
-    def enc_string(str_val, size=0, endian='big', to_bytestr='true'):
+    def enc_string(str_val, size=0, endian='big', to_bytestr=True):
         if size > len(str_val):
             raise T32DataPacketError('[Encode Error][enc_string]Invalid Size : %d' % size)
         enc_val = str_val.encode()
@@ -79,7 +79,7 @@ class T32DataDecoder:
 
     @staticmethod
     def decode_int(data, size=4, encoding='hex', endian='big'):
-        if encoding == 'number':
+        if encoding == 'plain':
             return int(data)
 
         if encoding == 'bytes':
@@ -94,7 +94,7 @@ class T32DataDecoder:
 
     @staticmethod
     def decode_float(data, size=4, encoding='hex', endian='big'):
-        if encoding == 'number':
+        if encoding == 'plain':
             return float(data)
 
         if encoding == 'bytes':
@@ -107,7 +107,9 @@ class T32DataDecoder:
         return struct.unpack('f', byte_value[:size])[0]
 
     @staticmethod
-    def decode_string(data, size=0, type='utf-8'):
+    def decode_string(data, size=0, encoding='hex', type='utf-8'):
+        if encoding == 'plain':
+            return str(data[:size])
         if size == 0:
             size = int(len(data)/2)
         return T32DataDecoder.decode_byte(data, size).decode(type)
@@ -118,8 +120,17 @@ class T32DataPacket:
         self.name = name
         self.parameters = parameters
         self.decode_func = None
+        self.encode_func = None
         self.__init_decode_func__()
+        self.__init_encode_func__()
         self.parameter_values = self.__init_param_values__(parameters)
+
+    def __init_encode_func__(self):
+        self.encode_func = defaultdict()
+        self.encode_func['ByteArray'] = T32DataEncoder.enc_bytestr
+        self.encode_func['String'] = T32DataEncoder.enc_string
+        self.encode_func['Int'] = T32DataEncoder.enc_int
+        self.encode_func['Float'] = T32DataEncoder.enc_float
 
     def __init_decode_func__(self):
         self.decode_func = defaultdict()
@@ -142,11 +153,15 @@ class T32DataPacket:
     def __decode__(self, data_values, data_pos=0, data_sub_pos=0, parameters=defaultdict()):
         param_values = defaultdict()
 
+        if len(data_values) <= data_pos:
+            raise T32DataPacketError("[Decode Error]No remain data during decoding : curr_pos(%d), curr_params(%s)"
+                                     % (data_pos, ''.join(name+',' for name in parameters)[:-1]))
+
         for name, meta_info in parameters.items():
             (param_type, data_size, encoding) = meta_info['type'], meta_info['size'], meta_info['encoding']
             if param_type not in self.decode_func:
                 raise T32DataPacketError("[Decode Error]Invalid type(%s) - %s" % (type, name))
-            if encoding not in ['number', 'hex', 'hex_stream']:
+            if encoding not in ['plain', 'hex', 'hex_stream']:
                 raise T32DataPacketError("[Decode Error]Invalid encoding type(%s) - %s" % (encoding, name))
 
             if param_type == 'Struct':
@@ -173,12 +188,33 @@ class T32DataPacket:
                 break
         return data_pos, data_sub_pos, param_values
 
+    def __encode__(self, param_configs=None, param_values=None):
+        enc_val = ''
+        for name, config_info in param_configs.items():
+            sub_param_val = param_values[name]
+            (param_type, data_size, encoding) = config_info['type'], config_info['size'], config_info['encoding']
+            if config_info['type'] == 'Struct':
+                for val in sub_param_val:
+                    enc_val += (self.__encode__(config_info['sub_parameters'], val))
+                continue
+
+            if encoding == 'plain':
+                enc_val += str(sub_param_val)
+            else:
+                enc_val += self.encode_func[param_type](sub_param_val, data_size)
+            if encoding != 'hex_stream':
+                enc_val += ' '
+        return enc_val
+
+    def encode(self):
+        enc_val = self.__encode__(self.parameters, self.parameter_values)
+        if enc_val[-1] == ' ':
+            enc_val = enc_val[:-1]
+        return enc_val
+
     def decode(self, data_values):
         parameters = self.parameters
         data_pos, data_sub_pos, self.parameter_values = self.__decode__(data_values, parameters=parameters)
-
-    def encode(self):
-        pass
 
     def get(self, path=''):
         data_path_list = path.split('.')
@@ -197,8 +233,48 @@ class T32DataPacket:
                 return None
         return param_values
 
-    def set(self, path, data):
-        pass
+    def set(self, path, value):
+        data_path_list = path.split('.')
+        param_values = self.parameter_values
+        param_configs = self.parameters
+
+        if len(data_path_list) == 0:
+            raise T32DataPacketError('[Data Set Error]Data Path is Null')
+
+        last_param = data_path_list.pop()
+        curr_path = ''
+        for path in data_path_list:
+            m = re.match(r'(\w+)\[(\d+)\]', path)
+            param_name, value_index = path, 0
+            if m is not None:
+                param_name, value_index = m.group(1), int(m.group(2))
+
+            curr_path = curr_path.join(param_name+'.')
+            if param_name in param_values:
+                param_values = param_values[param_name]
+                param_configs = param_configs[param_name]
+
+                if param_configs is None:
+                    raise T32DataPacketError('[Data Set Error]Invalid path - ' + curr_path[:len(curr_path)-1])
+                if param_configs['type'] == 'Struct':
+                    for i in range(value_index - len(param_values) + 1):
+                        param_values.append(self.__init_param_values__(param_configs['sub_parameters']))
+                    param_values = param_values[value_index]
+                    param_configs = param_configs['sub_parameters']
+            else:
+                return None
+
+        type_mappings = {int:'Int', float:'Flaot', str:'String', bytes:'ByteArray'}
+        if type(value) not in type_mappings:
+            raise T32DataPacketError('[Data Set Error]Invalid type - ' + str(type(value)))
+        if last_param not in param_values:
+            raise T32DataPacketError('[Data Set Error]Param name mismatch : %s' % path)
+
+        param_configs = param_configs[last_param]
+        if type_mappings[type(value)] != param_configs['type']:
+            raise T32DataPacketError('[Data Set Error]type mismatch - path:%s, type:val(%s),param(%s)'
+                                     % (path, type_mappings[type(value)], param_configs['type']))
+        param_values[last_param] = value
 
 
 class T32DataParser:
@@ -254,7 +330,6 @@ class T32DataParser:
         return None
 
 
-
 if __name__ == "__main__":
     parser = T32DataParser(data_path="../message_format.json")
     data = parser.create("LELMBTAM_INIT_CNF")
@@ -262,16 +337,18 @@ if __name__ == "__main__":
     print('#'*50)
     print('>> Value Structure !!')
     print('-'*70)
+    data.set('numOfDevice', 2)
+    data.set('stLeKey.bd_addr', b'12345678')
+    data.set('stLeKey[2].bd_addr', b'ABCDEFGH')
     pprint.pprint(data.parameter_values)
-    print('###########################################')
+    print('#'*50)
 
-
-    print('###########################################')
-    data.decode(data_values=["0002", "010203040506070800000120666698j90000",
+    print('#'*50)
+    data.decode(data_values=["2", "010203040506070800000122",
                              "010203640506070800000100666698j900000"])
     print(data.name)
     pprint.pprint(data.parameter_values)
-    print('###########################################')
+    print('#'*50)
 
     device_cnt = data.get('numOfDevice')
     print('Num Of Device: %d' % device_cnt)
@@ -279,7 +356,11 @@ if __name__ == "__main__":
         bd_addr = data.get('stLeKey[%d].bd_addr'%index)
         print('\t>#%02d BD_ADDR: %s' % (index, T32DataEncoder.enc_bytestr(bd_addr)))
 
-    print('###########################################')
+    print('#'*50)
+    enc_val = data.encode()
+    print(enc_val)
+
+    print('#'*50)
     val = T32DataEncoder.enc_string('2.443333', 4)
     val_decode = T32DataDecoder.decode_string(val)
     print('String :',val, val_decode)

@@ -12,7 +12,7 @@
       "numOfDevice": {
         "type": "Int",
         "size": "2",
-        "encoding": "number"
+        "encoding": "plain"
       },
       "stLeKey": {
         "type": "Struct",
