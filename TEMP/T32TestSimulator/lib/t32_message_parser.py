@@ -13,9 +13,64 @@ class T32DataPacketError(Exception):
         return self.msg
 
 
+class T32DataEncoder:
+    @staticmethod
+    def enc_bytestr(byte_val, fixed_size=0):
+        byte_arr_value = bytearray(byte_val)
+        if fixed_size > 0 :
+            byte_arr_value = bytearray(fixed_size)
+            for pos in range(min(len(byte_val), fixed_size)):
+                byte_arr_value[pos] = byte_val[pos]
+
+        return ''.join('%02X'%b for b in byte_arr_value)
+
+    @staticmethod
+    def enc_int(int_val, size=2, endian='big', to_bytestr=True):
+        formatters = {1: 'B', 2: 'H', 4: 'L', 8: 'Q'}
+        if size not in formatters:
+            raise T32DataPacketError('[Encode Error][enc_int]Invalid Size : %d' % size)
+
+        fmt = formatters[size]
+        if int_val < 0:
+            fmt = fmt.lower()
+        if endian == 'big':
+            fmt = '>' + fmt
+
+        enc_val = struct.pack(fmt, int_val)
+        if to_bytestr :
+            enc_val = T32DataEncoder.enc_bytestr(enc_val)
+        return enc_val
+
+    @staticmethod
+    def enc_float(float_val, size=4, endian='big', to_bytestr='true'):
+        formatters = {4: 'f', 8: 'd'}
+        if size not in formatters:
+            raise T32DataPacketError('[Encode Error][enc_float]Invalid Size : %d' % size)
+        fmt = formatters[size]
+        if endian == 'big':
+            fmt = '>' + fmt
+
+        enc_val = struct.pack(fmt, float_val)
+        if to_bytestr :
+            enc_val = T32DataEncoder.enc_bytestr(enc_val)
+        return enc_val
+
+    @staticmethod
+    def enc_string(str_val, size=0, endian='big', to_bytestr='true'):
+        if size > len(str_val):
+            raise T32DataPacketError('[Encode Error][enc_string]Invalid Size : %d' % size)
+        enc_val = str_val.encode()
+        if to_bytestr:
+            enc_val = T32DataEncoder.enc_bytestr(enc_val)
+        return enc_val
+
+
 class T32DataDecoder:
     @staticmethod
-    def decode_byte(data, size, encoding='hex', endian='big'):
+    def decode_byte(data, size=0, encoding='hex', endian='big'):
+        if size == 0:
+            size = int(len(data)/2)
+
         end = (2 * size)
         if len(data) < end:
             raise T32DataPacketError("Decode Error : Length Mismatch : Data(%s), size(%d)" % (data, size))
@@ -23,7 +78,7 @@ class T32DataDecoder:
         return byte_val
 
     @staticmethod
-    def decode_int(data, size=2, encoding='hex', endian='big'):
+    def decode_int(data, size=4, encoding='hex', endian='big'):
         if encoding == 'number':
             return int(data)
 
@@ -47,11 +102,14 @@ class T32DataDecoder:
         else:
             byte_value = T32DataDecoder.decode_byte(data, size)
             if endian == 'big':
-                byte_value = list(reversed(byte_value))
-        return struct.unpack('f', byte_value[:size])
+                byte_value = bytearray(reversed(byte_value))
+
+        return struct.unpack('f', byte_value[:size])[0]
 
     @staticmethod
-    def decode_string(data, size, type='utf-8'):
+    def decode_string(data, size=0, type='utf-8'):
+        if size == 0:
+            size = int(len(data)/2)
         return T32DataDecoder.decode_byte(data, size).decode(type)
 
 
@@ -59,9 +117,9 @@ class T32DataPacket:
     def __init__(self, name, parameters):
         self.name = name
         self.parameters = parameters
-        self.parameter_values = defaultdict()
         self.decode_func = None
         self.__init_decode_func__()
+        self.parameter_values = self.__init_param_values__(parameters)
 
     def __init_decode_func__(self):
         self.decode_func = defaultdict()
@@ -70,6 +128,16 @@ class T32DataPacket:
         self.decode_func['Int'] = T32DataDecoder.decode_int
         self.decode_func['Float'] = T32DataDecoder.decode_float
         self.decode_func['Struct'] = self.decode
+
+    def __init_param_values__(self, parameters):
+        param_values = defaultdict()
+        for name, param_config in parameters.items():
+            param_values[name] = None
+            if param_config['type'] == 'Struct':
+                param_values[name] = [defaultdict()]*1
+                param_values[name][0] = self.__init_param_values__(param_config['sub_parameters'])
+
+        return param_values
 
     def __decode__(self, data_values, data_pos=0, data_sub_pos=0, parameters=defaultdict()):
         param_values = defaultdict()
@@ -90,7 +158,7 @@ class T32DataPacket:
                 param_values[name] = [defaultdict()]*array_size
                 for pos in range(array_size):
                     (data_pos, data_sub_pos, param_values[name][pos]) \
-                        = self.__decode__(data_values, data_pos=data_pos, data_sub_pos=data_sub_pos,parameters=meta_info['sub_parameters'])
+                        = self.__decode__(data_values, data_pos, data_sub_pos, meta_info['sub_parameters'])
                 continue
 
             param_values[name] = self.decode_func[param_type](data_values[data_pos][data_sub_pos:], data_size, encoding=encoding)
@@ -105,7 +173,7 @@ class T32DataPacket:
                 break
         return data_pos, data_sub_pos, param_values
 
-    def decode(self, data_values, sub_param=None, sub_values=None, index=0, sub_index=0):
+    def decode(self, data_values):
         parameters = self.parameters
         data_pos, data_sub_pos, self.parameter_values = self.__decode__(data_values, parameters=parameters)
 
@@ -186,16 +254,49 @@ class T32DataParser:
         return None
 
 
+
 if __name__ == "__main__":
-    parser = T32DataParser(data_path="..\message_format.json")
+    parser = T32DataParser(data_path="../message_format.json")
     data = parser.create("LELMBTAM_INIT_CNF")
-    data.decode(data_values=["0002", "010203040506070800000120666698j90000", "010203640506070800000100666698j900000"])
 
-    print(data.name)
-    pprint.pprint(data.parameters)
+    print('#'*50)
+    print('>> Value Structure !!')
+    print('-'*70)
     pprint.pprint(data.parameter_values)
+    print('###########################################')
 
-    val = data.get('numOfDevice')
-    val1, val2 = data.get('stLeKey[0].bd_addr'), data.get('stLeKey[1].bd_addr')
-    print('BD_ADDR: ' + ''.join('%02X'%v for v in val1))
-    print(''.join('%02X' % v for v in val2))
+
+    print('###########################################')
+    data.decode(data_values=["0002", "010203040506070800000120666698j90000",
+                             "010203640506070800000100666698j900000"])
+    print(data.name)
+    pprint.pprint(data.parameter_values)
+    print('###########################################')
+
+    device_cnt = data.get('numOfDevice')
+    print('Num Of Device: %d' % device_cnt)
+    for index in range(device_cnt):
+        bd_addr = data.get('stLeKey[%d].bd_addr'%index)
+        print('\t>#%02d BD_ADDR: %s' % (index, T32DataEncoder.enc_bytestr(bd_addr)))
+
+    print('###########################################')
+    val = T32DataEncoder.enc_string('2.443333', 4)
+    val_decode = T32DataDecoder.decode_string(val)
+    print('String :',val, val_decode)
+
+    val = T32DataEncoder.enc_int(8844, size=4, to_bytestr=False)
+    val_decode = T32DataDecoder.decode_int(val, size=4, encoding='bytes')
+    print('Int(Size:4) :',val, val_decode)
+
+    val = T32DataEncoder.enc_int(123456789012345, size=8, to_bytestr=True)
+    val_decode = T32DataDecoder.decode_int(val, size=8, encoding='hex')
+    print('Int(Size:8) :',val, val_decode)
+
+    val = T32DataEncoder.enc_bytestr(b'\x00\x01\x02\xAA')
+    val_decode = T32DataDecoder.decode_byte(val)
+    print('ByteArray :', val, val_decode)
+
+    val = T32DataEncoder.enc_bytestr(b'ABCD', fixed_size=7)
+    val_decode = T32DataDecoder.decode_byte(val)
+    print('ByteArray(FixLength) :', val, val_decode)
+    print('###########################################')
