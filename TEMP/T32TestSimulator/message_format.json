@@ -1,38 +1,34 @@
 {
   "LELMBTAM_MESSAGES" : {
-    "LELMBTAM_INIT_REQ": {
-
-    },
+    "LELMBTAM_INIT_REQ": {},
 
     "LELMBTAM_INIT_IND": {
-
-    },
-
-    "LELMBTAM_INIT_CNF": {
-      "numOfDevice": {
-        "type": "Int",
-        "size": "2",
-        "encoding": "plain"
-      },
-      "stLeKey": {
+      "param1": { "order" : "1", "type": "String", "size": "8", "encoding": "hex" },
+      "param2": {
+        "order" : "2",
         "type": "Struct",
-        "array_size_from" : "numOfDevice",
+        "array_size" : "3",
         "sub_parameters" : {
-          "bd_addr": {
-            "type" : "ByteArray",
-            "size" : "8",
-            "encoding" : "hex_stream"
-          },
-          "return": {
-            "type" : "Int",
-            "size" : "4",
-            "encoding" : "hex"
-          }
+          "sub_param2": { "order":"2", "type" : "Int", "size" : "4", "encoding" : "hex_stream" },
+          "sub_param1": { "order":"1", "type" : "ByteArray", "size" : "8", "encoding" : "hex_stream"},
+          "sub_param3": { "order":"3", "type" : "String", "size" : "8", "encoding" : "hex"}
         }
       }
     },
 
-    "LELMBTAM_CMD_COMPLETE_IND" : {},
+    "LELMBTAM_INIT_CNF": {
+      "numOfDevice": { "order" : "1", "type": "Int", "size": "2", "encoding": "plain" },
+      "stLeKey": {
+        "order" : "2",
+        "type": "Struct",
+        "array_size_from" : "numOfDevice",
+        "sub_parameters" : {
+          "bd_addr": { "order":"1", "type" : "ByteArray", "size" : "8", "encoding" : "hex_stream"},
+          "return": { "order":"2", "type" : "Int", "size" : "4", "encoding" : "hex" }
+        }
+      }
+    },
+   "LELMBTAM_CMD_COMPLETE_IND" : {},
     "LELMBTAM_ADVERTISING_IND" : {},
     "LELMBTAM_CONNECTION_COMPLETE_IND" : {},
     "LELMBTAM_DISCONNECT_COMPLETE_IND" : {},

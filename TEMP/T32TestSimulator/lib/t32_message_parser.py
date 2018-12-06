@@ -58,7 +58,7 @@ class T32DataEncoder:
     @staticmethod
     def enc_string(str_val, size=0, endian='big', to_bytestr=True):
         if size > len(str_val):
-            raise T32DataPacketError('[Encode Error][enc_string]Invalid Size : %d' % size)
+            str_val += ('\0' * (size-len(str_val)))
         enc_val = str_val.encode()
         if to_bytestr:
             enc_val = T32DataEncoder.enc_bytestr(enc_val)
@@ -141,17 +141,30 @@ class T32DataPacket:
         self.decode_func['Struct'] = self.decode
 
     def __init_param_values__(self, parameters):
-        param_values = defaultdict()
+        param_values = OrderedDict()
         for name, param_config in parameters.items():
             param_values[name] = None
             if param_config['type'] == 'Struct':
-                param_values[name] = [defaultdict()]*1
-                param_values[name][0] = self.__init_param_values__(param_config['sub_parameters'])
+                arr_size = max(int(param_config['array_size']), 1)
+                param_values[name] = [OrderedDict()]*arr_size
+                for pos in range(arr_size):
+                    param_values[name][pos] = self.__init_param_values__(param_config['sub_parameters'])
 
         return param_values
 
-    def __decode__(self, data_values, data_pos=0, data_sub_pos=0, parameters=defaultdict()):
-        param_values = defaultdict()
+    def __default_val__(self, param_type, data_size=1):
+        if param_type == 'Int':
+            sub_param_val = 0
+        elif param_type == 'Float':
+            sub_param_val = float(0.0)
+        elif param_type == 'String':
+            sub_param_val = '\0'*data_size
+        else:
+            sub_param_val = bytes([0 for i in range(data_size)])
+        return sub_param_val
+
+    def __decode__(self, data_values, data_pos=0, data_sub_pos=0, parameters=OrderedDict()):
+        param_values = OrderedDict()
 
         if len(data_values) <= data_pos:
             raise T32DataPacketError("[Decode Error]No remain data during decoding : curr_pos(%d), curr_params(%s)"
@@ -170,7 +183,7 @@ class T32DataPacket:
                 if arr_size_from in param_values:
                     array_size = param_values[arr_size_from]
 
-                param_values[name] = [defaultdict()]*array_size
+                param_values[name] = [OrderedDict()]*array_size
                 for pos in range(array_size):
                     (data_pos, data_sub_pos, param_values[name][pos]) \
                         = self.__decode__(data_values, data_pos, data_sub_pos, meta_info['sub_parameters'])
@@ -192,11 +205,15 @@ class T32DataPacket:
         enc_val = ''
         for name, config_info in param_configs.items():
             sub_param_val = param_values[name]
+
             (param_type, data_size, encoding) = config_info['type'], config_info['size'], config_info['encoding']
-            if config_info['type'] == 'Struct':
+            if param_type == 'Struct':
                 for val in sub_param_val:
                     enc_val += (self.__encode__(config_info['sub_parameters'], val))
                 continue
+
+            if sub_param_val is None:
+                sub_param_val = self.__default_val__(param_type, data_size)
 
             if encoding == 'plain':
                 enc_val += str(sub_param_val)
@@ -207,8 +224,8 @@ class T32DataPacket:
         return enc_val
 
     def encode(self):
-        enc_val = self.__encode__(self.parameters, self.parameter_values)
-        if enc_val[-1] == ' ':
+        enc_val = self.name + ' ' + self.__encode__(self.parameters, self.parameter_values)
+        if len(enc_val) > 0 and enc_val[-1] == ' ':
             enc_val = enc_val[:-1]
         return enc_val
 
@@ -297,19 +314,23 @@ class T32DataParser:
 
     @staticmethod
     def parse_parameters(parameters):
-        param_list = defaultdict(defaultdict)
+        param_list = OrderedDict()
         if parameters is None or len(parameters) == 0:
             return {}
 
-        for param_key, param_value in parameters.items():
-            param_list[param_key] = defaultdict(defaultdict)
-            param_list[param_key]['type'] = param_value.get('type', 'Int')
-            param_list[param_key]['size'] = int(param_value.get('size', '0'))
-            param_list[param_key]['encoding'] = param_value.get('encoding', 'hex')
-            param_list[param_key]['array_size'] = int(param_value.get('array_size', '1'))
-            param_list[param_key]['array_size_from'] = param_value.get('array_size_from', None)
-            param_list[param_key]['sub_parameters'] = T32DataParser.parse_parameters(param_value.get('sub_parameters', None))
-            param_list[param_key]['value'] = None
+        param_key_list = [key for key in parameters]
+        param_key_list = sorted(param_key_list, key=lambda k: parameters[k]['order'])
+
+        for key in param_key_list:
+            param_value = parameters[key]
+            param_list[key] = OrderedDict()
+            param_list[key]['type'] = param_value.get('type', 'Int')
+            param_list[key]['size'] = int(param_value.get('size', '0'))
+            param_list[key]['encoding'] = param_value.get('encoding', 'hex')
+            param_list[key]['array_size'] = int(param_value.get('array_size', '1'))
+            param_list[key]['array_size_from'] = param_value.get('array_size_from', None)
+            param_list[key]['sub_parameters'] = T32DataParser.parse_parameters(param_value.get('sub_parameters', None))
+            param_list[key]['value'] = None
 
         return param_list
 
@@ -332,35 +353,58 @@ class T32DataParser:
 
 if __name__ == "__main__":
     parser = T32DataParser(data_path="../message_format.json")
-    data = parser.create("LELMBTAM_INIT_CNF")
+    data = parser.create("LELMBTAM_INIT_IND")
 
     print('#'*50)
     print('>> Value Structure !!')
     print('-'*70)
-    data.set('numOfDevice', 2)
-    data.set('stLeKey.bd_addr', b'12345678')
-    data.set('stLeKey[2].bd_addr', b'ABCDEFGH')
+    data.set('param1', 'ABCD')
+    data.set('param2[0].sub_param1', bytes([v for v in range(8)]))
+    data.set('param2[0].sub_param2', 8000)
+    data.set('param2[2].sub_param2', 4000)
+
     pprint.pprint(data.parameter_values)
+    print(data.encode())
     print('#'*50)
 
+    # data decoding test
     print('#'*50)
+    print('>> Data Decoding !!')
+    print('-'*70)
+    data = parser.create('LELMBTAM_INIT_CNF')
     data.decode(data_values=["2", "010203040506070800000122",
                              "010203640506070800000100666698j900000"])
     print(data.name)
     pprint.pprint(data.parameter_values)
     print('#'*50)
 
+    # data extraction from DataPacket
+    print('#' * 50)
+    print('>> Data Extraction !!')
+    print('-'*70)
     device_cnt = data.get('numOfDevice')
     print('Num Of Device: %d' % device_cnt)
     for index in range(device_cnt):
         bd_addr = data.get('stLeKey[%d].bd_addr'%index)
         print('\t>#%02d BD_ADDR: %s' % (index, T32DataEncoder.enc_bytestr(bd_addr)))
+    print('#' * 50)
 
+    #data encoding
     print('#'*50)
+    print('>> Packet Data Encoding !!')
+    print('-'*70)
     enc_val = data.encode()
     print(enc_val)
 
+    data2 = parser.create('LELMBTAM_INIT_REQ')
+    print(data2.encode())
+
+    data3 = parser.create('LELMBTAM_CMD_COMPLETE_IND')
+    print(data3.encode())
+    print('#' * 50)
+
     print('#'*50)
+    print('>> Primitive Data Encoding !!')
     val = T32DataEncoder.enc_string('2.443333', 4)
     val_decode = T32DataDecoder.decode_string(val)
     print('String :',val, val_decode)
